@@ -36,7 +36,7 @@ const options = {
 
 ( async( ) => {
 
-	const downloadPostsMT = async ( ) => {
+	const downloadPosts = async ( ) => {
 
 		let index = 0;
 		let working = 0;
@@ -201,7 +201,7 @@ const options = {
 
 		if( totalPages == 0 ) {
 
-			downloadPostsMT( );
+			downloadPosts( );
 
 			return;
 
@@ -213,7 +213,7 @@ const options = {
 
 			console.log( `\nParsed ${ parsed } pages, got total of ${ postIDs.length } post IDs` );
 
-			downloadPostsMT( );
+			downloadPosts( );
 
 			return;
 
