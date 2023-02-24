@@ -4,6 +4,56 @@ Array.prototype.last = function( ) {
 
 }
 
+const remainderUnits = [ 'ms', 's', 'm', 'h', 'd' ];
+
+const formatRemainder = ms => {
+
+	let remainder = ms / 1000;
+
+	let slaveRemainder = 0;
+
+	let level = 0;
+
+	// S -> M
+
+	if( remainder > 60 ) {
+
+		level++;
+
+		remainder /= 60
+
+		slaveRemainder = ( remainder % 1 ) * 60
+
+	}
+
+	// M -> H
+
+	if( remainder > 60 && level == 1 ) {
+
+		level++;
+
+		remainder /= 60
+
+		slaveRemainder = ( remainder % 1 ) * 60
+
+	}
+
+	// H -> D
+
+	if( remainder > 24 && level == 2 ) {
+
+		level++;
+
+		remainder /= 24
+
+		slaveRemainder = ( remainder % 1 ) * 24
+
+	}
+
+	return `${ Math.floor( remainder ) }${ remainderUnits[ level + 1 ] }${ level > 0 && Math.round( slaveRemainder ) > 0 ? ` ${ Math.round( slaveRemainder ) }${ remainderUnits[ level ] }` : '' }`
+
+}
+
 const os = require( 'os' );
 const fs = require( 'fs' );
 const HTMLParser = require( 'node-html-parser' );
@@ -36,21 +86,18 @@ const options = {
 
 ( async( ) => {
 
+	console.clear( );
+
 	const downloadPosts = async ( ) => {
 
 		let index = 0;
 		let working = 0;
 		let finished = 0;
 
-		let speed = 0;
-		let downloaded = 0;
+		let throughput = { };
 
-		setInterval( ( ) => {
-
-			speed = Math.round( downloaded );
-			downloaded = 0;
-
-		}, 1000 );
+		let averageSpeed = 0;
+		let averageSpeedSnaps = 0;
 
 		const maxWorkers = ( postIDs.length > threads * 10 ) ? threads * 10 : postIDs.length;
 
@@ -58,7 +105,9 @@ const options = {
 
 		const download = async ( index, callback ) => {
 
-			const retry = ( ) => {
+			const retry = async repeated => {
+
+				if( repeated ) await new Promise( r => setTimeout( r, 2500 ) );
 
 				try {
 
@@ -73,7 +122,7 @@ const options = {
 
 						if( !src ) {
 
-							setTimeout( ( ) => retry( ), 2500 );
+							retry( true );
 
 							return;
 
@@ -88,40 +137,38 @@ const options = {
 
 							const size = res.headers[ 'content-length' ];
 
-							res.pipe( fileStream );
+							if( res.statusCode != 200 ) {
 
-							if( tempData.length < 250 ) res.on( 'data', data => tempData += data );
+								console.log( res.statusCode );
+
+								retry( true );
+
+								return;
+
+							}
+
+							res.on( 'data', data => throughput[ performance.now( ) ] = data.length );
+
+							res.pipe( fileStream );
 
 							res.on( 'end', ( ) => {
 
-								if( tempData.includes( '503 Service Temporarily Unavailable' ) ) {
+								fileStream.close( );
+								callback( filename );
 
-									setTimeout( ( ) => retry( ), 2500 );
-
-									return;
-
-								} else {
-
-									fileStream.close( );
-									downloaded += size / 1_000_000;
-
-									callback( filename );
-
-									return;
-
-								}
+								return;
 
 							} );
 
 						} );
 
-						req.on( 'error', err => setTimeout( ( ) => retry( ), 2500 ) );
+						req.on( 'error', err => retry( true ) );
 
-					} ).catch( err => setTimeout( ( ) => retry( ), 2500 ) );
+					} ).catch( err => retry( true ) );
 
 				} catch( error ) {
 
-					setTimeout( ( ) => retry( ), 2500 );
+					retry( true );
 
 				}
 
@@ -142,30 +189,10 @@ const options = {
 				finished++;
 				working--;
 
-				const statusStr = Array( process.stdout.columns ).fill( ' ' );
-				const wStr = `Downloaded ${ Math.floor( ( ( finished ) / postIDs.length ) * 100 ) }% (${ finished }/${ postIDs.length }): [${ postIDs[ ownIndex ] }] => ${ filename }`;
-				const timeStr = `Elapsed: ${ ( ( performance.now( ) - beginStamp ) / 1000 / 60 ).toFixed( 2 ) } min | ETA: ${ Math.round( ( ( ( finished / ( performance.now( ) - beginStamp ) ) * postIDs.length ) - ( performance.now( ) - beginStamp ) / 1000 / 60 ) ) } min | Speed: ${ speed }MB/s | Workers: ${ working }/${ maxWorkers }`;
-
-				statusStr[ 0 ] = '\r';
-				[ ... wStr ].forEach( ( c, cindex ) => statusStr[ cindex + 1 ] = c );
-				[ ... timeStr ].reverse( ).forEach( ( c, cindex ) => statusStr[ statusStr.length - cindex - 1 ] = c );
-
-				process.stdout.write( `${ statusStr.join( '' ) }` );
-
 				if( index < postIDs.length ) {
 
 					downloadCycle( );
 					index++;
-
-				} else {
-
-					if( working == 0 ) {
-
-						process.stdout.write( '\nAll downloaded.' );
-
-						process.exit( );
-
-					}
 
 				}
 
@@ -179,6 +206,43 @@ const options = {
 			index++;
 
 		}
+
+		const workingInterval = setInterval( ( ) => {
+
+			const speed = Math.round( Object.keys( throughput ).filter( stamp => {
+
+				if( stamp > performance.now( ) - 1000 ) return true;
+
+				delete throughput[ stamp ];
+				return false;
+
+			} ).map( bytes => bytes = throughput[ bytes ] ).reduce( ( total, bytes ) => total + bytes, 0 ) / 1_000_000 );
+
+			averageSpeedSnaps++;
+			averageSpeed = ( averageSpeed + speed ) / averageSpeedSnaps;
+
+			const elapsed = performance.now( ) - beginStamp;
+			let eta = ( ( postIDs.length - finished ) / averageSpeed ) * 1000;
+
+			const statusStr = Array( process.stdout.columns ).fill( ' ' );
+			const wStr = `Downloaded ${ Math.floor( ( ( finished ) / postIDs.length ) * 100 ) }% (${ finished }/${ postIDs.length })`;
+			const timeStr = `Elapsed: ${ formatRemainder( elapsed ) } | ETA: ${ formatRemainder( eta ) } | Speed: ${ speed }MB/s | Workers: ${ working }/${ maxWorkers }`;
+
+			statusStr[ 0 ] = '\r';
+			[ ... wStr ].forEach( ( c, cindex ) => statusStr[ cindex + 1 ] = c );
+			[ ... timeStr ].reverse( ).forEach( ( c, cindex ) => statusStr[ statusStr.length - cindex - 1 ] = c );
+
+			process.stdout.write( `${ statusStr.join( '' ) }` );
+
+			if( finished == postIDs.length ) {
+
+				process.stdout.write( '\nAll downloaded.' );
+
+				process.exit( );
+
+			}
+
+		}, 500 );
 
 	}
 
